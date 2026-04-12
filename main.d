@@ -1,0 +1,149 @@
+import std.array;
+import std.bitmanip;
+import std.socket;
+import std.stdio;
+
+align(1) struct DNSHeader {
+  ushort id;
+  ushort flags;
+  ushort qdcount; // questions
+  ushort ancount; // answers
+  ushort nscount; // authority records
+  ushort arcount; // additional records
+
+  ubyte[] encode() const {
+    ubyte[] buffer;
+    buffer.length = 12;
+    size_t offset = 0;
+
+    buffer.write!(ushort, Endian.bigEndian)(id,      &offset);
+    buffer.write!(ushort, Endian.bigEndian)(flags,   &offset);
+    buffer.write!(ushort, Endian.bigEndian)(qdcount, &offset);
+    buffer.write!(ushort, Endian.bigEndian)(ancount, &offset);
+    buffer.write!(ushort, Endian.bigEndian)(nscount, &offset);
+    buffer.write!(ushort, Endian.bigEndian)(arcount, &offset);
+
+    return buffer;
+  }
+
+  static DNSHeader decode(const ubyte[] data) {
+    if (data.length < 12) throw new Exception("Buffer is too small for header");
+
+    DNSHeader h;
+    size_t offset = 0;
+
+    h.id      = peek!(ushort, Endian.bigEndian)(data, offset); offset += 2;
+    h.flags   = peek!(ushort, Endian.bigEndian)(data, offset); offset += 2;
+    h.qdcount = peek!(ushort, Endian.bigEndian)(data, offset); offset += 2;
+    h.ancount = peek!(ushort, Endian.bigEndian)(data, offset); offset += 2;
+    h.nscount = peek!(ushort, Endian.bigEndian)(data, offset); offset += 2;
+    h.arcount = peek!(ushort, Endian.bigEndian)(data, offset); offset += 2;
+
+    return h;
+  }
+}
+
+ubyte[] encodeDomain(string domain) {
+  auto buffer = appender!(ubyte [])();
+  auto parts = domain.split(".");
+
+  foreach (part; parts) {
+    buffer.put(cast(ubyte) part.length);
+    foreach (char c; part) {
+      buffer.put(cast(ubyte) c);
+    }
+  }
+  buffer.put(cast(ubyte) 0);
+
+  return buffer.data;
+}
+
+int main() {
+  DNSHeader header;
+  header.id      = 0x1234;
+  header.flags   = 0x0100; // Recursion desired
+  header.qdcount = 1;      // 1 question
+  auto encodedHeader = header.encode();
+
+  string target = "google.com";
+  auto encodedDomain = encodeDomain(target);
+
+  // 4 bytes needed after the name, 2 for both
+  ushort qtype = 1;  // A record for 1
+  ushort qclass = 1; // IN       for 1
+
+  ubyte[] packet;
+  packet ~= encodedHeader;
+  packet ~= encodedDomain;
+  packet ~= nativeToBigEndian(qtype);
+  packet ~= nativeToBigEndian(qclass);
+
+  auto socket = new UdpSocket();
+  auto address = new InternetAddress("8.8.8.8", 53);
+
+  socket.sendTo(packet, address);
+  writeln("Query send, waiting for response...");
+
+  ubyte[512] recvBuf;
+  auto received = socket.receiveFrom(recvBuf);
+
+  if (received < DNSHeader.sizeof) {
+    writeln("Invalid response.");
+    return 128;
+  }
+
+  writeln("Got ", received, " bytes.");
+
+  auto respHeader = DNSHeader.decode(recvBuf[0 .. 12]);
+  int rcode = respHeader.flags & 0x000F;
+  writefln("id = 0x%X, answers = %d, rcode = %d",
+           respHeader.id,
+           respHeader.ancount,
+           rcode);
+
+  if (rcode != 0 || respHeader.ancount == 0) {
+    writeln("Error or no answers received.");
+    return 1;
+  }
+
+  size_t offset = 12;
+
+  while (recvBuf[offset] != 0) {
+    offset += recvBuf[offset] + 1;
+  } //            Skip question
+  offset += 1; // Skip QTYPE
+  offset += 4; // Skip QCLASS
+
+  for (int i = 0; i < respHeader.ancount; ++i) {
+    // Check for name compression, 11 in binary which is 0xC0
+    if ((recvBuf[offset] & 0xC0) == 0xC0) {
+      offset += 2;
+    } else {
+      // Skip the question (domain) label by label
+      // 6 g o o g l e 3 c o m 0
+      while (recvBuf[offset] != 0)
+        offset += recvBuf[offset] + 1;
+      offset += 1;
+    }
+
+    ushort rType   = peek!(ushort, Endian.bigEndian)(recvBuf[], offset); offset += 2;
+    ushort rClass  = peek!(ushort, Endian.bigEndian)(recvBuf[], offset); offset += 2;
+    uint   rTtl    = peek!(uint,   Endian.bigEndian)(recvBuf[], offset); offset += 4;
+    ushort rLength = peek!(ushort, Endian.bigEndian)(recvBuf[], offset); offset += 2;
+
+    // Type 1 is an A Record (IPv4) and length should be 4 bytes.
+    if (rType == 1 && rLength == 4) {
+      writefln("Found answer: %d.%d.%d.%d (TTL: %ds)", 
+        recvBuf[offset],
+        recvBuf[offset+1],
+        recvBuf[offset+2],
+        recvBuf[offset+3],
+        rTtl);
+    }
+
+    // Jump to the next answer (if there are)
+    offset += rLength;
+  }
+
+  return 0;
+}
