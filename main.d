@@ -2,6 +2,7 @@ import std.array;
 import std.bitmanip;
 import std.socket;
 import std.stdio;
+import std.string;
 
 align(1) struct DNSHeader {
   ushort id;
@@ -65,7 +66,8 @@ int main() {
   header.qdcount = 1;      // 1 question
   auto encodedHeader = header.encode();
 
-  string target = "google.com";
+  write("Enter the domain: ");
+  string target = readln().strip();
   auto encodedDomain = encodeDomain(target);
 
   // 4 bytes needed after the name, 2 for both
