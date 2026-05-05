@@ -3,6 +3,7 @@ import std.bitmanip;
 import std.socket;
 import std.stdio;
 import std.string;
+import std.system;
 
 align(1) struct DNSHeader {
   ushort id;
@@ -12,35 +13,32 @@ align(1) struct DNSHeader {
   ushort nscount; // authority records
   ushort arcount; // additional records
 
-  ubyte[] encode() const {
-    ubyte[] buffer;
-    buffer.length = 12;
+  ubyte[] bigEndian() const {
+    ubyte[] buf;
+    buf.length = 12;
+
     size_t offset = 0;
+    buf.write!(ushort, Endian.bigEndian)(id,      &offset);
+    buf.write!(ushort, Endian.bigEndian)(flags,   &offset);
+    buf.write!(ushort, Endian.bigEndian)(qdcount, &offset);
+    buf.write!(ushort, Endian.bigEndian)(ancount, &offset);
+    buf.write!(ushort, Endian.bigEndian)(nscount, &offset);
+    buf.write!(ushort, Endian.bigEndian)(arcount, &offset);
 
-    buffer.write!(ushort, Endian.bigEndian)(id,      &offset);
-    buffer.write!(ushort, Endian.bigEndian)(flags,   &offset);
-    buffer.write!(ushort, Endian.bigEndian)(qdcount, &offset);
-    buffer.write!(ushort, Endian.bigEndian)(ancount, &offset);
-    buffer.write!(ushort, Endian.bigEndian)(nscount, &offset);
-    buffer.write!(ushort, Endian.bigEndian)(arcount, &offset);
-
-    return buffer;
+    return buf;
   }
 
-  static DNSHeader decode(const ubyte[] data) {
-    if (data.length < 12) throw new Exception("Buffer is too small for header");
+  /// Parse a DNS header from buffer, e.g. a query response.
+  /// `b` will be consumed.
+  this(ubyte[] b) {
+    if (b.length != 12) throw new Exception("Expect a DNS header buffer that is 12 bytes long");
 
-    DNSHeader h;
-    size_t offset = 0;
-
-    h.id      = peek!(ushort, Endian.bigEndian)(data, offset); offset += 2;
-    h.flags   = peek!(ushort, Endian.bigEndian)(data, offset); offset += 2;
-    h.qdcount = peek!(ushort, Endian.bigEndian)(data, offset); offset += 2;
-    h.ancount = peek!(ushort, Endian.bigEndian)(data, offset); offset += 2;
-    h.nscount = peek!(ushort, Endian.bigEndian)(data, offset); offset += 2;
-    h.arcount = peek!(ushort, Endian.bigEndian)(data, offset); offset += 2;
-
-    return h;
+    this.id      = b.read!(ushort, Endian.bigEndian);
+    this.flags   = b.read!(ushort, Endian.bigEndian);
+    this.qdcount = b.read!(ushort, Endian.bigEndian);
+    this.ancount = b.read!(ushort, Endian.bigEndian);
+    this.nscount = b.read!(ushort, Endian.bigEndian);
+    this.arcount = b.read!(ushort, Endian.bigEndian);
   }
 }
 
@@ -64,7 +62,6 @@ int main() {
   header.id      = 0x1234;
   header.flags   = 0x0100; // Recursion desired
   header.qdcount = 1;      // 1 question
-  auto encodedHeader = header.encode();
 
   write("Enter the domain: ");
   string target = readln().strip();
@@ -75,7 +72,7 @@ int main() {
   ushort qclass = 1; // IN       for 1
 
   ubyte[] packet;
-  packet ~= encodedHeader;
+  packet ~= header.bigEndian;
   packet ~= encodedDomain;
   packet ~= nativeToBigEndian(qtype);
   packet ~= nativeToBigEndian(qclass);
@@ -96,7 +93,7 @@ int main() {
 
   writeln("Got ", received, " bytes.");
 
-  auto respHeader = DNSHeader.decode(recvBuf[0 .. 12]);
+  auto respHeader = DNSHeader(recvBuf[0 .. 12]);
   int rcode = respHeader.flags & 0x000F;
   writefln("id = 0x%X, answers = %d, rcode = %d",
            respHeader.id,
@@ -135,7 +132,7 @@ int main() {
 
     // Type 1 is an A Record (IPv4) and length should be 4 bytes.
     if (rType == 1 && rLength == 4) {
-      writefln("Found answer: %d.%d.%d.%d (TTL: %ds)", 
+      writefln("Found answer: %d.%d.%d.%d (TTL: %ds)",
         recvBuf[offset],
         recvBuf[offset+1],
         recvBuf[offset+2],
